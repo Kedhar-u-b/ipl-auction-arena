@@ -34,7 +34,12 @@ export class AuctionNetwork {
 
         this.peer?.on("connection", (conn) => {
           console.log("INCOMING CONNECTION:", conn.peer);
+
+          this.connections.set(conn.peer, conn);
+
           this.setupConnection(conn);
+
+          this.onConnect?.(conn.peer);
         });
 
         resolve(id);
@@ -75,6 +80,8 @@ export class AuctionNetwork {
 
           console.log("CONNECTED TO HOST");
 
+          this.connections.set(conn.peer, conn);
+
           this.setupConnection(conn);
 
           resolve();
@@ -95,14 +102,6 @@ export class AuctionNetwork {
   }
 
   private setupConnection(conn: DataConnection) {
-    conn.on("open", () => {
-      console.log("PEER CONNECTED:", conn.peer);
-
-      this.connections.set(conn.peer, conn);
-
-      this.onConnect?.(conn.peer);
-    });
-
     conn.on("data", (data) => {
       console.log("MESSAGE:", data);
 
@@ -132,7 +131,7 @@ export class AuctionNetwork {
 
     this.connections.forEach((conn) => {
       if (conn.open) {
-        conn.send(structuredClone(msg));
+        conn.send(JSON.parse(JSON.stringify(msg)));
       }
     });
   }
@@ -142,7 +141,7 @@ export class AuctionNetwork {
 
     const host = this.connections.values().next().value;
 
-    if (host?.open) {
+    if (host && host.open) {
       host.send(msg);
     }
   }
@@ -150,7 +149,7 @@ export class AuctionNetwork {
   sendTo(peerId: string, msg: NetworkMessage) {
     const conn = this.connections.get(peerId);
 
-    if (conn?.open) {
+    if (conn && conn.open) {
       conn.send(msg);
     }
   }
