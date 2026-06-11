@@ -143,7 +143,17 @@ export default function App() {
   }, [bcastLobby, addLog]);
 
   const onClientMsg = useCallback((_pid: string, msg: NetworkMessage) => {
-    if (msg.type === 'lobby_state') setLobbyPlayers(msg.data.players);
+    if (msg.type === 'lobby_state') {
+      setLobbyPlayers(msg.data.players);
+
+      const me = msg.data.players.find(
+        (p: any) => p.name === myName
+      );
+
+      if (me?.teamId) {
+        setMyTeamId(me.teamId);
+      }
+    }
     else if (msg.type === 'game_state') {
       const d = msg.data as GameStateBroadcast;
       setTeams(d.teams); setCurPlayer(d.currentPlayer); setCurBid(d.currentBid);
@@ -153,7 +163,7 @@ export default function App() {
       setDone(d.auctionComplete); setWinTeam(d.winningTeamId);
       setScreen('auction');
     } else if (msg.type === 'error') notify(msg.data.message || 'Error');
-  }, [notify]);
+  }, [notify, myName]);
 
   const cleanup = useCallback(() => {
     aiT.current.forEach(clearTimeout); aiT.current = [];
@@ -267,7 +277,28 @@ export default function App() {
     setConnStatus('connecting');
     try {
       const n = new AuctionNetwork();
+
       n.onMessage = onHostMsg;
+
+      n.onConnect = (pid) => {
+        const taken = lobbyPlayers
+          .map(p => p.teamId)
+          .filter(Boolean);
+
+        const avail = IPL_TEAMS
+          .filter(t => !taken.includes(t.id))
+          .map(t => t.id);
+
+        n.sendTo(pid, {
+          type: 'lobby_state',
+          data: {
+            players: lobbyPlayers,
+            availableTeamIds: avail,
+            roomCode: code
+          }
+        });
+      };
+
       n.onDisconnect = (pid) => {
         setLobbyPlayers(prev => { const up = prev.filter(p => p.peerId !== pid); bcastLobby(up); addLog('👋 Player disconnected', 'system'); return up; });
       };
@@ -289,7 +320,12 @@ export default function App() {
       n.onDisconnect = () => { notify('⚠️ Lost connection'); setTimeout(() => { cleanup(); setScreen('landing'); }, 2000); };
       await n.joinRoom(joinCode);
       netRef.current = n; setMode('client'); setRoomCode(joinCode.toUpperCase()); setConnStatus('connected');
-      n.sendToHost({ type: 'join', data: { name: myName } });
+      setTimeout(() => {
+        n.sendToHost({
+          type: 'join',
+          data: { name: myName }
+        });
+      }, 500);
       setScreen('lobby');
     } catch (e: any) { notify('Failed: ' + (e.message || 'Not found')); setConnStatus('error'); cleanup(); }
   };
