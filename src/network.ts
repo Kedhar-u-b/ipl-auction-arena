@@ -1,11 +1,13 @@
-import Peer, { DataConnection } from 'peerjs';
-import type { NetworkMessage } from './types';
+import Peer, { DataConnection } from "peerjs";
+import type { NetworkMessage } from "./types";
 
-const PEER_CONFIG = { debug: 0 };
+const PEER_CONFIG = {
+  debug: 2,
+};
 
 export class AuctionNetwork {
   peer: Peer | null = null;
-  connections: Map<string, DataConnection> = new Map();
+  connections = new Map<string, DataConnection>();
   isHost = false;
 
   onMessage: ((fromPeerId: string, msg: NetworkMessage) => void) | null = null;
@@ -13,84 +15,172 @@ export class AuctionNetwork {
   onDisconnect: ((peerId: string) => void) | null = null;
   onError: ((error: any) => void) | null = null;
 
-  private createPeerWithId(id: string): Promise<string> {
+  async createRoom(): Promise<string> {
+    this.isHost = true;
+
+    const roomCode = this.generateCode();
+
     return new Promise((resolve, reject) => {
-      this.peer = new Peer(id, PEER_CONFIG);
-      const timeout = setTimeout(() => reject(new Error('Connection timeout')), 15000);
-      this.peer.on('open', (assignedId) => { clearTimeout(timeout); resolve(assignedId); });
-      this.peer.on('error', (err: any) => {
+      this.peer = new Peer(roomCode, PEER_CONFIG);
+
+      const timeout = setTimeout(() => {
+        reject(new Error("Peer creation timeout"));
+      }, 15000);
+
+      this.peer.on("open", (id) => {
         clearTimeout(timeout);
-        if (err.type === 'unavailable-id') {
-          this.createPeerWithId(this.generateCode()).then(resolve).catch(reject);
-        } else { reject(err); }
+
+        console.log("HOST OPEN:", id);
+
+        this.peer?.on("connection", (conn) => {
+          console.log("INCOMING CONNECTION:", conn.peer);
+          this.setupConnection(conn);
+        });
+
+        resolve(id);
+      });
+
+      this.peer.on("error", (err) => {
+        clearTimeout(timeout);
+        console.error("HOST ERROR:", err);
+        this.onError?.(err);
+        reject(err);
       });
     });
   }
 
-  private createPeerRandom(): Promise<string> {
-    return new Promise((resolve, reject) => {
-      this.peer = new Peer(PEER_CONFIG);
-      const timeout = setTimeout(() => reject(new Error('Connection timeout')), 15000);
-      this.peer.on('open', (assignedId) => { clearTimeout(timeout); resolve(assignedId); });
-      this.peer.on('error', (err) => { clearTimeout(timeout); reject(err); });
-    });
-  }
-
-  async createRoom(): Promise<string> {
-    this.isHost = true;
-    const code = await this.createPeerWithId(this.generateCode());
-    this.peer!.on('connection', (conn) => { this.setupConnection(conn); });
-    return code;
-  }
-
-  async joinRoom(code: string): Promise<void> {
+  async joinRoom(roomCode: string): Promise<void> {
     this.isHost = false;
-    await this.createPeerRandom();
+
     return new Promise((resolve, reject) => {
-      const conn = this.peer!.connect(code.toUpperCase().trim(), { reliable: true });
-      const timeout = setTimeout(() => { reject(new Error('Room not found.')); conn.close(); }, 10000);
-      conn.on('open', () => { clearTimeout(timeout); this.setupConnection(conn); resolve(); });
-      conn.on('error', (err) => { clearTimeout(timeout); reject(err); });
+      this.peer = new Peer(undefined, PEER_CONFIG);
+
+      this.peer.on("open", () => {
+        console.log("CLIENT OPEN:", this.peer?.id);
+
+        const conn = this.peer!.connect(
+          roomCode.trim().toUpperCase(),
+          {
+            reliable: true,
+          }
+        );
+
+        const timeout = setTimeout(() => {
+          conn.close();
+          reject(new Error("Room not found"));
+        }, 10000);
+
+        conn.on("open", () => {
+          clearTimeout(timeout);
+
+          console.log("CONNECTED TO HOST");
+
+          this.setupConnection(conn);
+
+          resolve();
+        });
+
+        conn.on("error", (err) => {
+          clearTimeout(timeout);
+          console.error("JOIN ERROR:", err);
+          reject(err);
+        });
+      });
+
+      this.peer.on("error", (err) => {
+        console.error("CLIENT PEER ERROR:", err);
+        reject(err);
+      });
     });
   }
 
   private setupConnection(conn: DataConnection) {
-    conn.on('open', () => { this.connections.set(conn.peer, conn); this.onConnect?.(conn.peer); });
-    conn.on('data', (data) => { this.onMessage?.(conn.peer, data as NetworkMessage); });
-    conn.on('close', () => { this.connections.delete(conn.peer); this.onDisconnect?.(conn.peer); });
-    conn.on('error', () => { this.connections.delete(conn.peer); });
+    conn.on("open", () => {
+      console.log("PEER CONNECTED:", conn.peer);
+
+      this.connections.set(conn.peer, conn);
+
+      this.onConnect?.(conn.peer);
+    });
+
+    conn.on("data", (data) => {
+      console.log("MESSAGE:", data);
+
+      this.onMessage?.(
+        conn.peer,
+        data as NetworkMessage
+      );
+    });
+
+    conn.on("close", () => {
+      console.log("PEER DISCONNECTED:", conn.peer);
+
+      this.connections.delete(conn.peer);
+
+      this.onDisconnect?.(conn.peer);
+    });
+
+    conn.on("error", (err) => {
+      console.error("CONNECTION ERROR:", err);
+
+      this.connections.delete(conn.peer);
+    });
   }
 
   broadcast(msg: NetworkMessage) {
     if (!this.isHost) return;
-    const data = JSON.parse(JSON.stringify(msg));
-    this.connections.forEach((conn) => { try { if (conn.open) conn.send(data); } catch {} });
+
+    this.connections.forEach((conn) => {
+      if (conn.open) {
+        conn.send(structuredClone(msg));
+      }
+    });
   }
 
   sendToHost(msg: NetworkMessage) {
     if (this.isHost) return;
-    const hostConn = this.connections.values().next().value;
-    try { if (hostConn?.open) hostConn.send(msg); } catch {}
+
+    const host = this.connections.values().next().value;
+
+    if (host?.open) {
+      host.send(msg);
+    }
   }
 
   sendTo(peerId: string, msg: NetworkMessage) {
     const conn = this.connections.get(peerId);
-    try { if (conn?.open) conn.send(msg); } catch {}
+
+    if (conn?.open) {
+      conn.send(msg);
+    }
   }
 
   destroy() {
-    this.connections.forEach((conn) => { try { conn.close(); } catch {} });
+    this.connections.forEach((conn) => conn.close());
+
     this.connections.clear();
-    try { this.peer?.destroy(); } catch {}
+
+    this.peer?.destroy();
+
     this.peer = null;
   }
 
-  get connectedCount(): number { return this.connections.size; }
+  get connectedCount() {
+    return this.connections.size;
+  }
 
-  private generateCode(): string {
-    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) code += c[Math.floor(Math.random() * c.length)];
+  private generateCode() {
+    const chars =
+      "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+    let code = "";
+
+    for (let i = 0; i < 6; i++) {
+      code += chars[
+        Math.floor(Math.random() * chars.length)
+      ];
+    }
+
     return code;
   }
 }
